@@ -5,6 +5,10 @@ collected via the Prolific platform. It handles various survey data formats,
 parses multiple-choice and open-ended questions, and generates visualizations 
 and summary statistics.
 
+https://github.com/binarybottle/analyze-mindlogger-survey-responses
+
+Author: Arno Klein (arnoklein.info)
+
 ## Features
 
 - **Flexible Data Processing**: Analyzes single survey files or entire directories of survey data
@@ -125,4 +129,4 @@ If you encounter issues with the script not correctly parsing your survey data:
 
 ## Extra: LLM prompt to consolidate open-ended responses
 
-For the attached csv file, consolidates all similar responses to each question (except for responses that essentially mean "No", "None", or "Not really") and generate a new csv file, where each row has the question, unique (consolidated) response, and the number of instances of that response.
+For the attached text_responses.csv file, consolidates all similar responses to each question (except for responses that essentially mean "No", "None", or "Not really") and generate a new csv file, where each row has the question, unique (consolidated) response, and the number of instances of that response.

@@ -21,7 +21,7 @@ Usage:
     python analyze_survey_responses.py --dir data/responses --output results --format png --dpi 300
     
     # With user filtering:
-    python analyze_survey_responses.py --file survey_data.csv --output results --filter --filter-file exclusion_rules.csv
+    python analyze_survey_responses.py --dir data/responses --output results --filter --filter-file filter_rules.csv
 """
 
 import pandas as pd
@@ -35,6 +35,9 @@ from typing import Dict, List, Tuple, Any, Optional
 import numpy as np
 import textwrap
 
+#-------------------------------------------------------------------------------
+# Command-line Parsing and Main Function
+#-------------------------------------------------------------------------------
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description='Analyze survey data')
@@ -44,8 +47,248 @@ def parse_args():
     parser.add_argument('--output', '-o', help='Output directory for figures', default='survey_results')
     parser.add_argument('--format', '-f', help='Output format for figures', default='png')
     parser.add_argument('--dpi', '-d', type=int, help='DPI for output figures', default=300)
+    parser.add_argument('--filter', '-filter', action='store_true', help='Apply user filtering based on predefined rules')
+    parser.add_argument('--filter-file', help='Path to CSV file containing filtering rules')
     return parser.parse_args()
 
+def main():
+    args = parse_args()
+    
+    # Create base output directory
+    os.makedirs(args.output, exist_ok=True)
+    
+    # Load filter rules if specified
+    exclusion_rules = []
+    if args.filter:
+        if args.filter_file:
+            exclusion_rules = load_filter_rules(args.filter_file)
+            print(f"Loaded {len(exclusion_rules)} exclusion rules from {args.filter_file}")
+        else:
+            print("No filter rules specified. Specify --filter-file for custom rules.")
+    
+    if args.file:
+        # Process a single file
+        print(f"Analyzing survey data from file: {args.file}")
+        
+        # Read the CSV file
+        df = pd.read_csv(args.file)
+        original_user_count = count_unique_users(df)
+
+        # Diagnose attention check    
+        diagnose_attention_check(df)
+        check_user_exclusion(df, exclusion_rules)
+
+        # Filter out users based on exclusion rules
+        excluded_df = pd.DataFrame()
+        exclusion_reasons = {}
+        if args.filter and exclusion_rules:
+            print("Applying user filtering...")
+            df, excluded_df, exclusion_reasons = filter_users(df, exclusion_rules)
+            
+            # Save the excluded data
+            excluded_file = os.path.join(args.output, 'excluded_data.csv')
+            excluded_df.to_csv(excluded_file, index=False)
+            print(f"Excluded data saved to: {excluded_file}")
+            
+            # Save exclusion reasons
+            reason_file = os.path.join(args.output, 'exclusion_reasons.txt')
+            with open(reason_file, 'w') as f:
+                f.write("Survey Exclusion Report\n")
+                f.write("=====================\n\n")
+                f.write(f"Total users excluded: {len(set([user for users in exclusion_reasons.values() for user in users]))}\n\n")
+                for reason, users in exclusion_reasons.items():
+                    f.write(f"Reason: {reason}\n")
+                    f.write(f"Count: {len(users)}\n")
+                    f.write(f"Users: {', '.join(str(u) for u in users[:10])}")
+                    if len(users) > 10:
+                        f.write(f" and {len(users) - 10} more")
+                    f.write("\n\n")
+            print(f"Exclusion report saved to: {reason_file}")
+        
+        # Continue with the analysis using the filtered data
+        filtered_user_count = count_unique_users(df)
+        results = analyze_survey_dataframe(df, args.output, args.format, args.dpi, 
+                                          user_counts=(original_user_count, filtered_user_count))
+        
+        print("\nAnalysis complete!")
+        print(f"Original respondents: {original_user_count}")
+        print(f"Filtered respondents: {filtered_user_count}")
+        print(f"Total questions analyzed: {results['total_questions']}")
+        print(f"Multiple choice questions: {results['multiple_choice_questions']}")
+        print(f"Open-ended questions: {results['open_ended_questions']}")
+        print(f"Generated {len(results['figures'])} visualizations")
+        print(f"Report saved to: {results['report_path']}")
+        print(f"All output saved to directory: {args.output}")
+    
+    elif args.dir:
+        # Process all CSV files in the directory as one combined dataset
+        print(f"Analyzing all survey data files in directory: {args.dir} as one combined dataset")
+        
+        # First load all the files to get a combined dataset
+        all_files_df = load_directory_files(args.dir)
+        if all_files_df is None or len(all_files_df) == 0:
+            print("No valid data found. Exiting.")
+            return
+            
+        original_user_count = count_unique_users(all_files_df)
+        
+        # Apply filtering if requested
+        excluded_df = pd.DataFrame()
+        exclusion_reasons = {}
+        if args.filter and exclusion_rules:
+            print("Applying user filtering...")
+            all_files_df, excluded_df, exclusion_reasons = filter_users(all_files_df, exclusion_rules)
+            
+            # Save the excluded data
+            excluded_file = os.path.join(args.output, 'excluded_data.csv')
+            excluded_df.to_csv(excluded_file, index=False)
+            print(f"Excluded data saved to: {excluded_file}")
+            
+            # Save exclusion reasons
+            reason_file = os.path.join(args.output, 'exclusion_reasons.txt')
+            with open(reason_file, 'w') as f:
+                f.write("Survey Exclusion Report\n")
+                f.write("=====================\n\n")
+                f.write(f"Total users excluded: {len(set([user for users in exclusion_reasons.values() for user in users]))}\n\n")
+                for reason, users in exclusion_reasons.items():
+                    f.write(f"Reason: {reason}\n")
+                    f.write(f"Count: {len(users)}\n")
+                    f.write(f"Users: {', '.join(str(u) for u in users[:10])}")
+                    if len(users) > 10:
+                        f.write(f" and {len(users) - 10} more")
+                    f.write("\n\n")
+            print(f"Exclusion report saved to: {reason_file}")
+        
+        filtered_user_count = count_unique_users(all_files_df)
+        combined_results = analyze_survey_dataframe(all_files_df, args.output, args.format, args.dpi,
+                                                 user_counts=(original_user_count, filtered_user_count))
+        
+        if combined_results:
+            print("\nCombined analysis complete!")
+            print(f"Original respondents: {original_user_count}")
+            print(f"Filtered respondents: {filtered_user_count}")
+            print(f"Total questions analyzed: {combined_results['total_questions']}")
+            print(f"Multiple choice questions: {combined_results['multiple_choice_questions']}")
+            print(f"Open-ended questions: {combined_results['open_ended_questions']}")
+            print(f"Generated {len(combined_results['figures'])} visualizations")
+            print(f"Report saved to: {combined_results['report_path']}")
+            print(f"All output saved to directory: {args.output}")
+            
+            # Add information about source files to the report if available
+            if 'source_files' in combined_results and combined_results['source_files']:
+                with open(combined_results['report_path'], 'a') as f:
+                    f.write("\n\nSource Files:\n")
+                    f.write("-------------\n")
+                    for idx, file_name in enumerate(combined_results['source_files'], 1):
+                        f.write(f"{idx}. {file_name}\n")
+
+#-------------------------------------------------------------------------------
+# Data Loading and Identification Functions
+#-------------------------------------------------------------------------------
+def count_unique_users(df: pd.DataFrame) -> int:
+    """
+    Count the number of unique users/respondents in the DataFrame.
+    Specifically looks for Prolific IDs or similar unique user identifiers.
+    
+    Args:
+        df: The survey data DataFrame
+    
+    Returns:
+        Number of unique users
+    """
+    # Prioritize Prolific ID columns
+    prolific_id_cols = ['prolific_id', 'prolific_pid', 'participant_id', 'participant', 'pid', 'user_id', 'subject_id']
+    
+    # Try each column that might contain Prolific IDs
+    for col in prolific_id_cols:
+        if col in df.columns:
+            unique_count = df[col].nunique()
+            print(f"Found {unique_count} unique users based on '{col}' column")
+            return unique_count
+    
+    # If no direct ID column found, look for columns containing 'prolific' or 'id'
+    possible_id_cols = [col for col in df.columns if 
+                       any(id_term in col.lower() for id_term in ['prolific', 'pid', 'id', 'user', 'participant', 'subject'])]
+    
+    for col in possible_id_cols:
+        if col in df.columns:
+            unique_count = df[col].nunique()
+            print(f"Found {unique_count} unique users based on '{col}' column")
+            return unique_count
+    
+    # As a last resort, try to find a column with unique values per user
+    metadata_cols = [col for col in df.columns if col not in 
+                    ['question_id', 'question_text', 'options_text', 'value', 'item_id', 'item_prompt', 
+                     'item_response_options', 'item_response']]
+    
+    if metadata_cols:
+        # Check if any single column might have unique user identifiers
+        for col in metadata_cols:
+            unique_vals = df[col].nunique()
+            total_rows = len(df)
+            
+            # If the number of unique values is much less than the total rows,
+            # it might be a user identifier
+            if 1 < unique_vals <= total_rows / 10:  # Heuristic: each user has at least 10 responses
+                print(f"Using '{col}' as user identifier with {unique_vals} unique values")
+                return unique_vals
+        
+        # Create a hash of metadata to identify unique users
+        print("Creating composite user identifier from metadata")
+        subset_cols = metadata_cols[:3]  # Use a few columns to avoid too much noise
+        df['temp_user_id'] = df[subset_cols].apply(lambda row: '_'.join(str(val) for val in row), axis=1)
+        return df['temp_user_id'].nunique()
+    
+    print("Warning: Could not identify unique users. Using estimate based on data structure.")
+    # Fallback: rough estimate of users based on total rows divided by average responses per user
+    estimated_responses_per_user = 20  # Conservative estimate
+    return max(1, len(df) // estimated_responses_per_user)
+
+def load_directory_files(directory: str) -> pd.DataFrame:
+    """
+    Load all CSV files from a directory into a single DataFrame.
+    
+    Args:
+        directory: Directory containing CSV files
+        
+    Returns:
+        Combined DataFrame of all CSV files
+    """
+    # List all CSV files in the directory
+    csv_files = [f for f in os.listdir(directory) if f.lower().endswith('.csv')]
+    
+    if not csv_files:
+        print(f"No CSV files found in directory: {directory}")
+        return None
+    
+    print(f"Found {len(csv_files)} CSV files to combine and analyze")
+    
+    # Read and concatenate all CSV files
+    all_dfs = []
+    for file_name in csv_files:
+        file_path = os.path.join(directory, file_name)
+        print(f"Reading file: {file_name}")
+        try:
+            df = pd.read_csv(file_path)
+            # Add source file information if desired
+            df['source_file'] = file_name
+            all_dfs.append(df)
+        except Exception as e:
+            print(f"Error reading {file_name}: {e}")
+    
+    if not all_dfs:
+        print("No valid CSV files could be read")
+        return None
+    
+    # Combine all dataframes
+    combined_df = pd.concat(all_dfs, ignore_index=True)
+    print(f"Combined dataset has {len(combined_df)} rows")
+    
+    return combined_df
+
+#-------------------------------------------------------------------------------
+# Data Structure and Option Parsing
+#-------------------------------------------------------------------------------
 def extract_option_mapping(options_text: str) -> Dict[int, str]:
     """
     Extract option mappings from the options text.
@@ -343,6 +586,379 @@ def parse_responses(df: pd.DataFrame, questions: Dict[str, Dict[str, Any]]) -> D
     
     return questions
 
+#-------------------------------------------------------------------------------
+# User Filtering Functions
+#-------------------------------------------------------------------------------
+def load_filter_rules(filter_file: str) -> List[Dict[str, Any]]:
+    """
+    Load user filtering rules from a CSV file.
+    
+    Args:
+        filter_file: Path to the CSV file containing filtering rules
+        
+    Returns:
+        List of dictionaries with filtering rules
+    """
+    try:
+        rules_df = pd.read_csv(filter_file)
+        print(f"Reading filter rules from {filter_file}")
+        print(f"Filter file columns: {rules_df.columns.tolist()}")
+        
+        required_columns = ['question_id', 'operation', 'value']
+        
+        # Check that required columns exist
+        missing_columns = [col for col in required_columns if col not in rules_df.columns]
+        if missing_columns:
+            print(f"Error: Filter rules CSV is missing required columns: {missing_columns}")
+            return []
+        
+        # Parse the rules
+        rules = []
+        for idx, row in rules_df.iterrows():
+            rule = {
+                'question_id': str(row['question_id']),  # Ensure question_id is string
+                'operation': row['operation'],
+            }
+            
+            # Handle the value based on the operation type
+            if rule['operation'] in ['equals', 'not_equals']:
+                # Try to convert to appropriate numeric type if possible
+                try:
+                    if isinstance(row['value'], str) and row['value'].isdigit():
+                        rule['value'] = int(row['value'])
+                    elif isinstance(row['value'], str) and row['value'].replace('.', '', 1).isdigit():
+                        rule['value'] = float(row['value'])
+                    else:
+                        rule['value'] = row['value']
+                except:
+                    rule['value'] = row['value']
+            
+            # For numeric comparisons, ensure value is numeric
+            elif rule['operation'] in ['greater_than', 'less_than']:
+                try:
+                    rule['value'] = float(row['value'])
+                except:
+                    print(f"Warning: Operation {rule['operation']} requires numeric value, but got '{row['value']}'. Converting to 0.")
+                    rule['value'] = 0
+            
+            # Special handling for "in_list" operation which needs a list value
+            elif rule['operation'] == 'in_list' and isinstance(row['value'], str):
+                try:
+                    # Try to parse as JSON list
+                    import json
+                    rule['value'] = json.loads(row['value'].replace("'", '"'))
+                except:
+                    # Fallback to simple string splitting
+                    values = row['value'].strip('[]').split(',')
+                    rule['value'] = [v.strip() for v in values]
+            else:
+                # For contains and other operations
+                rule['value'] = row['value']
+            
+            # Add reason if available
+            if 'reason' in row and not pd.isna(row['reason']):
+                rule['reason'] = row['reason']
+            
+            rules.append(rule)
+            print(f"Rule {idx+1}: {rule}")
+        
+        print(f"Loaded {len(rules)} filtering rules from {filter_file}")
+        return rules
+    
+    except Exception as e:
+        print(f"Error loading filter rules: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+def filter_users(df: pd.DataFrame, exclusion_rules: List[Dict[str, Any]]) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, List[str]]]:
+    """
+    Filter out users based on their responses to certain questions.
+    Robust to different data structures and response formats.
+    
+    Args:
+        df: The survey data DataFrame
+        exclusion_rules: List of dictionaries with filtering rules, each containing:
+            - 'question_id': ID of the question to check
+            - 'operation': Comparison operation ('equals', 'contains', 'greater_than', 'less_than', etc.)
+            - 'value': Value to compare against
+            - 'reason': Text description of why this rule excludes users
+    
+    Returns:
+        Tuple containing:
+        - DataFrame with filtered users
+        - DataFrame with excluded users
+        - Dictionary with exclusion reasons and lists of user IDs
+    """
+    # First check if we're working with a long or wide format
+    is_long_format = False
+    
+    # Check for columns that indicate long format
+    if any(col in df.columns for col in ['question_id', 'item_id', 'id']):
+        is_long_format = True
+        print("Detected long-format survey data")
+    else:
+        print("Detected wide-format survey data")
+    
+    # Identify user ID column
+    user_id_cols = ['prolific_id', 'prolific_pid', 'participant_id', 'subject_id', 'user_id', 'id', 'participant']
+    user_id_col = None
+    
+    for col in user_id_cols:
+        if col in df.columns:
+            user_id_col = col
+            break
+    
+    # If no direct ID column, try looking for columns with ID-like names
+    if not user_id_col:
+        possible_id_cols = [col for col in df.columns if 
+                           any(id_term in col.lower() for id_term in ['prolific', 'pid', 'id', 'user', 'participant', 'subject'])]
+        for col in possible_id_cols:
+            unique_vals = df[col].nunique()
+            if 1 < unique_vals < len(df) // 5:  # Heuristic: user IDs should be much fewer than rows
+                user_id_col = col
+                print(f"Using '{col}' as user ID column with {unique_vals} unique values")
+                break
+    
+    # Create a synthetic user ID if needed
+    if not user_id_col:
+        print("Warning: No user ID column found. Creating a synthetic user ID.")
+        # Use metadata columns to create a synthetic ID
+        metadata_cols = [col for col in df.columns if col not in 
+                        ['question_id', 'question_text', 'options_text', 'value', 'item_id', 'item_prompt', 
+                         'item_response_options', 'item_response']]
+        
+        if len(metadata_cols) > 0:
+            # Use just a couple columns to avoid too much granularity
+            subset_cols = metadata_cols[:min(3, len(metadata_cols))]
+            df['synthetic_user_id'] = df[subset_cols].apply(lambda row: '_'.join(str(val) for val in row), axis=1)
+            user_id_col = 'synthetic_user_id'
+            print(f"Created synthetic user ID using columns: {subset_cols}")
+        else:
+            # Last resort: use row indices as user IDs (very crude)
+            df['synthetic_user_id'] = df.index
+            user_id_col = 'synthetic_user_id'
+            print("Created synthetic user ID using row indices (caution: may not reflect true user grouping)")
+    
+    # Get all unique user IDs
+    all_users = df[user_id_col].unique()
+    print(f"Found {len(all_users)} unique users in the dataset")
+    
+    # Helper function to extract numeric value from various response formats
+    def extract_numeric_value(response):
+        """Extract numeric values from various response formats"""
+        if pd.isna(response):
+            return None
+        
+        # If already numeric, just return it
+        if isinstance(response, (int, float)):
+            return response
+        
+        # Handle string values
+        if isinstance(response, str):
+            # Format: "value: X" (common in your data)
+            value_match = re.search(r'value:\s*(\d+)', response)
+            if value_match:
+                return int(value_match.group(1))
+            
+            # Format: "Option X: Y" where Y is the value
+            option_match = re.search(r'[^:]+:\s*(\d+)', response)
+            if option_match:
+                return int(option_match.group(1))
+            
+            # Format: Just a number in the string
+            number_match = re.search(r'\b\d+\b', response)
+            if number_match:
+                return int(number_match.group(0))
+        
+        # If we couldn't extract a numeric value, return the original
+        return response
+    
+    # Track users to be excluded
+    excluded_users = set()
+    exclusion_reasons = defaultdict(list)
+    
+    # Process each exclusion rule
+    for rule_idx, rule in enumerate(exclusion_rules):
+        question_id = rule.get('question_id')
+        operation = rule.get('operation', 'equals')
+        target_value = rule.get('value')
+        reason = rule.get('reason', f"Response to question {question_id} {operation} {target_value}")
+        
+        print(f"Applying rule {rule_idx+1}: {question_id} {operation} {target_value}")
+        
+        # Skip incomplete rules
+        if not all([question_id, operation, target_value is not None]):
+            print(f"Skipping incomplete rule: {rule}")
+            continue
+        
+        # Different handling for long vs wide format
+        if is_long_format:
+            # Find columns for question IDs and responses
+            question_id_col = next((col for col in ['question_id', 'item_id', 'id'] if col in df.columns), None)
+            response_col = next((col for col in ['value', 'response', 'answer', 'item_response'] if col in df.columns), None)
+            
+            if not question_id_col or not response_col:
+                print(f"Error: Missing required columns for filtering in long format")
+                continue
+            
+            # Filter rows for this specific question
+            question_rows = df[df[question_id_col] == question_id]
+            
+            if len(question_rows) == 0:
+                print(f"Warning: No responses found for question {question_id}. Skipping rule.")
+                continue
+            
+            # Show sample responses for debugging
+            print(f"Sample responses for question {question_id}:")
+            for resp in question_rows[response_col].dropna().sample(min(5, len(question_rows))):
+                numeric_val = extract_numeric_value(resp)
+                print(f"  '{resp}' -> {numeric_val}")
+            
+            # Make a copy to avoid modifying the original dataframe
+            analysis_df = question_rows.copy()
+            
+            # Extract numeric values where possible
+            analysis_df['numeric_value'] = analysis_df[response_col].apply(extract_numeric_value)
+            
+            # For certain operations, we need to make sure we have a valid numeric value
+            is_numeric_operation = operation in ['equals', 'not_equals', 'greater_than', 'less_than']
+            
+            # Value count for debugging
+            print("Value counts of extracted numeric values:")
+            value_counts = analysis_df['numeric_value'].value_counts().head(10).to_dict()
+            print(value_counts)
+            
+            # For the target value, try to convert to numeric if it's a string
+            numeric_target = target_value
+            if isinstance(target_value, str) and target_value.isdigit():
+                numeric_target = int(target_value)
+            
+            # Apply the comparison operation
+            matching_rows = pd.DataFrame()
+            
+            if operation == 'equals':
+                # For equals, we want exact matches with the target value
+                matching_rows = analysis_df[analysis_df['numeric_value'] == numeric_target]
+            elif operation == 'not_equals':
+                # For not_equals, only consider rows where we could extract a valid numeric value
+                # Otherwise someone missing a response would be treated as "not equals"
+                has_valid_value = analysis_df['numeric_value'].apply(lambda x: isinstance(x, (int, float)))
+                matching_rows = analysis_df[has_valid_value & (analysis_df['numeric_value'] != numeric_target)]
+            elif operation == 'contains':
+                # For contains, we convert values to strings and check if they contain the target
+                matching_rows = analysis_df[analysis_df[response_col].astype(str).str.contains(str(target_value), na=False)]
+            elif operation == 'greater_than':
+                # Only apply to values we could convert to numeric
+                has_valid_value = analysis_df['numeric_value'].apply(lambda x: isinstance(x, (int, float)))
+                matching_rows = analysis_df[has_valid_value & (analysis_df['numeric_value'] > numeric_target)]
+            elif operation == 'less_than':
+                has_valid_value = analysis_df['numeric_value'].apply(lambda x: isinstance(x, (int, float)))
+                matching_rows = analysis_df[has_valid_value & (analysis_df['numeric_value'] < numeric_target)]
+            elif operation == 'in_list':
+                if isinstance(target_value, list):
+                    # Try to convert list elements to numeric if they're strings
+                    numeric_list = []
+                    for val in target_value:
+                        if isinstance(val, str) and val.isdigit():
+                            numeric_list.append(int(val))
+                        else:
+                            numeric_list.append(val)
+                    matching_rows = analysis_df[analysis_df['numeric_value'].isin(numeric_list)]
+                else:
+                    print(f"Warning: 'in_list' operation needs a list value. Skipping rule.")
+                    continue
+            else:
+                print(f"Warning: Unknown operation '{operation}'. Skipping rule.")
+                continue
+        else:
+            # Wide format - question ID should be a column name
+            if question_id not in df.columns:
+                print(f"Warning: Question {question_id} not found in columns. Skipping rule.")
+                continue
+            
+            # Make a copy for analysis
+            analysis_df = df.copy()
+            
+            # Extract numeric values from the responses in this column
+            analysis_df['numeric_value'] = analysis_df[question_id].apply(extract_numeric_value)
+            
+            # Show sample values for debugging
+            print(f"Sample values for column {question_id}:")
+            for val in analysis_df[question_id].dropna().sample(min(5, analysis_df[question_id].count())):
+                numeric_val = extract_numeric_value(val)
+                print(f"  '{val}' -> {numeric_val}")
+            
+            # For the target value, try to convert to numeric if it's a string
+            numeric_target = target_value
+            if isinstance(target_value, str) and target_value.isdigit():
+                numeric_target = int(target_value)
+            
+            # Apply the comparison operation
+            matching_rows = pd.DataFrame()
+            
+            if operation == 'equals':
+                matching_rows = analysis_df[analysis_df['numeric_value'] == numeric_target]
+            elif operation == 'not_equals':
+                has_valid_value = analysis_df['numeric_value'].apply(lambda x: isinstance(x, (int, float)))
+                matching_rows = analysis_df[has_valid_value & (analysis_df['numeric_value'] != numeric_target)]
+            elif operation == 'contains':
+                matching_rows = analysis_df[analysis_df[question_id].astype(str).str.contains(str(target_value), na=False)]
+            elif operation == 'greater_than':
+                has_valid_value = analysis_df['numeric_value'].apply(lambda x: isinstance(x, (int, float)))
+                matching_rows = analysis_df[has_valid_value & (analysis_df['numeric_value'] > numeric_target)]
+            elif operation == 'less_than':
+                has_valid_value = analysis_df['numeric_value'].apply(lambda x: isinstance(x, (int, float)))
+                matching_rows = analysis_df[has_valid_value & (analysis_df['numeric_value'] < numeric_target)]
+            elif operation == 'in_list':
+                if isinstance(target_value, list):
+                    numeric_list = []
+                    for val in target_value:
+                        if isinstance(val, str) and val.isdigit():
+                            numeric_list.append(int(val))
+                        else:
+                            numeric_list.append(val)
+                    matching_rows = analysis_df[analysis_df['numeric_value'].isin(numeric_list)]
+                else:
+                    print(f"Warning: 'in_list' operation needs a list value. Skipping rule.")
+                    continue
+            else:
+                print(f"Warning: Unknown operation '{operation}'. Skipping rule.")
+                continue
+        
+        # Get the users matching this rule
+        matching_users = set(matching_rows[user_id_col].unique())
+        print(f"Found {len(matching_users)} users matching rule {rule_idx+1}")
+        
+        # Add these users to our tracking
+        for user in matching_users:
+            excluded_users.add(user)
+            exclusion_reasons[reason].append(user)
+    
+    # Create masks for included and excluded users
+    included_mask = ~df[user_id_col].isin(excluded_users)
+    excluded_mask = df[user_id_col].isin(excluded_users)
+    
+    # Split the DataFrame
+    included_df = df[included_mask].copy()
+    excluded_df = df[excluded_mask].copy()
+    
+    # Print summary
+    n_included = len(included_df[user_id_col].unique())
+    n_excluded = len(excluded_df[user_id_col].unique())
+    
+    print(f"Filtering complete: {n_included} users included, {n_excluded} users excluded")
+    if n_excluded > 0:
+        print("Exclusion reasons:")
+        for reason, users in exclusion_reasons.items():
+            unique_users = len(set(users))
+            print(f"  - {reason}: {unique_users} users")
+    
+    return included_df, excluded_df, dict(exclusion_reasons)
+
+#-------------------------------------------------------------------------------
+# Analysis Functions
+#-------------------------------------------------------------------------------
 def analyze_multiple_choice(question: Dict[str, Any]) -> Dict[Any, int]:
     """
     Analyze multiple choice question responses.
@@ -493,96 +1109,6 @@ def analyze_open_ended(question: Dict[str, Any]) -> List[str]:
     
     return text_responses
 
-def plot_multiple_choice(question_id: str, question_text: str, counts: Dict[str, int], 
-                       output_dir: str, file_format: str, dpi: int) -> str:
-    """
-    Create a histogram for multiple choice question responses.
-    
-    Args:
-        question_id: The question ID
-        question_text: The question text
-        counts: Counts of responses for each option
-        output_dir: Directory to save the plot
-        file_format: File format for saving the plot
-        dpi: DPI for the output figure
-    
-    Returns:
-        Path to the saved figure
-    """
-    plt.figure(figsize=(12, 7))
-    
-    # Check if this is likely a numerical question
-    is_numerical_question = any(term in question_text.lower() for term in 
-                              ['how many', 'number of', 'age', 'years', 'count', 'quantity'])
-    
-    # Try to extract numeric values from labels when possible
-    numeric_values = {}
-    for key in counts.keys():
-        if isinstance(key, (int, float)):
-            numeric_values[key] = float(key)
-        elif isinstance(key, str) and key.isdigit():
-            numeric_values[key] = float(key)
-        elif isinstance(key, str):
-            # Look for numbers at the end of strings like "Text: 5"
-            match = re.search(r':\s*(\d+)$', key)
-            if match:
-                numeric_values[key] = float(match.group(1))
-            else:
-                # Try to find any number in the string
-                numbers = re.findall(r'\d+', key)
-                if numbers:
-                    numeric_values[key] = float(numbers[0])
-    
-    # Sort the items
-    if numeric_values and (is_numerical_question or len(numeric_values) >= len(counts) * 0.5):
-        # If we have numeric values and it's likely a numerical question, sort by values
-        sorted_items = [(key, counts[key]) for key in counts.keys()]
-        sorted_items.sort(key=lambda x: numeric_values.get(x[0], float('inf')))
-    else:
-        # Otherwise sort by frequency (descending)
-        sorted_items = sorted(counts.items(), key=lambda x: x[1], reverse=True)
-    
-    # Extract labels and values from sorted items
-    labels = []
-    values = [item[1] for item in sorted_items]
-    
-    # Process labels - if numerical question, use just numbers as labels
-    for item in sorted_items:
-        key = item[0]
-        if is_numerical_question and key in numeric_values:
-            # For numerical questions, use just the number as the label
-            labels.append(str(int(numeric_values[key])))
-        else:
-            labels.append(str(key))
-    
-    # Create the bar chart
-    bars = plt.bar(range(len(values)), values, width=0.7, color='#3498db', edgecolor='#2980b9')
-    
-    # Add count values on top of each bar
-    for i, v in enumerate(values):
-        plt.text(i, v + 0.1, str(v), ha='center', va='bottom', fontweight='bold')
-    
-    # Set labels and title
-    plt.xlabel('Response Options', fontsize=12)
-    plt.ylabel('Frequency', fontsize=12)
-    plt.title(f"{question_text}", fontsize=14, wrap=True)
-    
-    # Set x-axis tick labels with wrapped text
-    plt.xticks(range(len(labels)), [textwrap.fill(label, 30) for label in labels], 
-              rotation=45, ha='right', fontsize=10)
-    
-    # Adjust layout and add grid
-    plt.tight_layout()
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
-    
-    # Save the figure
-    filename = f"{question_id.replace(' ', '_').replace('/', '_')}.{file_format}"
-    filepath = os.path.join(output_dir, filename)
-    plt.savefig(filepath, dpi=dpi, bbox_inches='tight')
-    plt.close()
-    
-    return filepath
-
 def analyze_survey(file_path: str, output_dir: str, file_format: str, dpi: int) -> Dict[str, Any]:
     """
     Main function to analyze a single survey data file.
@@ -603,7 +1129,8 @@ def analyze_survey(file_path: str, output_dir: str, file_format: str, dpi: int) 
     df = pd.read_csv(file_path)
     return analyze_survey_dataframe(df, output_dir, file_format, dpi)
 
-def analyze_survey_dataframe(df: pd.DataFrame, output_dir: str, file_format: str, dpi: int) -> Dict[str, Any]:
+def analyze_survey_dataframe(df: pd.DataFrame, output_dir: str, file_format: str, dpi: int, 
+                         user_counts=None) -> Dict[str, Any]:
     """
     Analyze survey data from a DataFrame.
     
@@ -612,6 +1139,7 @@ def analyze_survey_dataframe(df: pd.DataFrame, output_dir: str, file_format: str
         output_dir: Directory to save output figures
         file_format: File format for saving figures
         dpi: DPI for output figures
+        user_counts: Optional tuple with (original_count, filtered_count) of respondents
     
     Returns:
         Dictionary with analysis results
@@ -760,7 +1288,7 @@ def analyze_survey_dataframe(df: pd.DataFrame, output_dir: str, file_format: str
                 }
     
     # Create a summary report using the improved generate_report function
-    report_path = generate_report(results, questions, output_dir)
+    report_path = generate_report(results, questions, output_dir, user_counts)
     
     if results['open_ended_questions'] > 0:
         results['text_responses_csv'] = export_text_responses_to_csv(results, output_dir)
@@ -817,13 +1345,127 @@ def process_directory(directory: str, output_dir: str, file_format: str, dpi: in
     results['total_files'] = len(csv_files)
     
     return results
+
+#-------------------------------------------------------------------------------
+# Visualization and Reporting Functions
+#-------------------------------------------------------------------------------
+def plot_multiple_choice(question_id: str, question_text: str, counts: Dict[str, int], 
+                       output_dir: str, file_format: str, dpi: int) -> str:
+    """
+    Create a histogram for multiple choice question responses.
     
-def generate_report(results, questions, output_dir):
-    """Generate a summary report of the survey analysis."""
+    Args:
+        question_id: The question ID
+        question_text: The question text
+        counts: Counts of responses for each option
+        output_dir: Directory to save the plot
+        file_format: File format for saving the plot
+        dpi: DPI for the output figure
+    
+    Returns:
+        Path to the saved figure
+    """
+    plt.figure(figsize=(12, 7))
+    
+    # Check if this is likely a numerical question
+    is_numerical_question = any(term in question_text.lower() for term in 
+                              ['how many', 'number of', 'age', 'years', 'count', 'quantity'])
+    
+    # Try to extract numeric values from labels when possible
+    numeric_values = {}
+    for key in counts.keys():
+        if isinstance(key, (int, float)):
+            numeric_values[key] = float(key)
+        elif isinstance(key, str) and key.isdigit():
+            numeric_values[key] = float(key)
+        elif isinstance(key, str):
+            # Look for numbers at the end of strings like "Text: 5"
+            match = re.search(r':\s*(\d+)$', key)
+            if match:
+                numeric_values[key] = float(match.group(1))
+            else:
+                # Try to find any number in the string
+                numbers = re.findall(r'\d+', key)
+                if numbers:
+                    numeric_values[key] = float(numbers[0])
+    
+    # Sort the items
+    if numeric_values and (is_numerical_question or len(numeric_values) >= len(counts) * 0.5):
+        # If we have numeric values and it's likely a numerical question, sort by values
+        sorted_items = [(key, counts[key]) for key in counts.keys()]
+        sorted_items.sort(key=lambda x: numeric_values.get(x[0], float('inf')))
+    else:
+        # Otherwise sort by frequency (descending)
+        sorted_items = sorted(counts.items(), key=lambda x: x[1], reverse=True)
+    
+    # Extract labels and values from sorted items
+    labels = []
+    values = [item[1] for item in sorted_items]
+    
+    # Process labels - if numerical question, use just numbers as labels
+    for item in sorted_items:
+        key = item[0]
+        if is_numerical_question and key in numeric_values:
+            # For numerical questions, use just the number as the label
+            labels.append(str(int(numeric_values[key])))
+        else:
+            labels.append(str(key))
+    
+    # Create the bar chart
+    bars = plt.bar(range(len(values)), values, width=0.7, color='#3498db', edgecolor='#2980b9')
+    
+    # Add count values on top of each bar
+    for i, v in enumerate(values):
+        plt.text(i, v + 0.1, str(v), ha='center', va='bottom', fontweight='bold')
+    
+    # Set labels and title
+    plt.xlabel('Response Options', fontsize=12)
+    plt.ylabel('Frequency', fontsize=12)
+    plt.title(f"{question_text}", fontsize=14, wrap=True)
+    
+    # Set x-axis tick labels with wrapped text
+    plt.xticks(range(len(labels)), [textwrap.fill(label, 30) for label in labels], 
+              rotation=45, ha='right', fontsize=10)
+    
+    # Adjust layout and add grid
+    plt.tight_layout()
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    
+    # Save the figure
+    filename = f"{question_id.replace(' ', '_').replace('/', '_')}.{file_format}"
+    filepath = os.path.join(output_dir, filename)
+    plt.savefig(filepath, dpi=dpi, bbox_inches='tight')
+    plt.close()
+    
+    return filepath
+
+def generate_report(results, questions, output_dir, user_counts=None):
+    """
+    Generate a summary report of the survey analysis.
+    
+    Args:
+        results: Results dictionary with analysis data
+        questions: Dictionary with question details
+        output_dir: Directory to save the report
+        user_counts: Tuple containing (original_count, filtered_count)
+    
+    Returns:
+        Path to the saved report file
+    """
     report_path = os.path.join(output_dir, 'survey_report.txt')
     with open(report_path, 'w') as f:
         f.write("Survey Analysis Report\n")
         f.write("====================\n\n")
+        
+        # Add information about respondents if available
+        if user_counts:
+            original_count, filtered_count = user_counts
+            f.write(f"Total Respondents: {original_count}\n")
+            if original_count != filtered_count:
+                f.write(f"Filtered Respondents: {filtered_count}\n")
+                f.write(f"Excluded Respondents: {original_count - filtered_count}\n")
+            f.write("\n")
+            
         f.write(f"Total Questions: {results['total_questions']}\n")
         f.write(f"Multiple Choice Questions: {results['multiple_choice_questions']}\n")
         f.write(f"Open-Ended Questions: {results['open_ended_questions']}\n\n")
@@ -917,117 +1559,8 @@ def export_text_responses_to_csv(results, output_dir):
     print(f"Text responses exported to: {csv_path}")
     return csv_path
 
-def load_filter_rules(filter_file: str) -> List[Dict[str, Any]]:
-    """
-    Load user filtering rules from a CSV file.
-    
-    Args:
-        filter_file: Path to the CSV file containing filtering rules
-        
-    Returns:
-        List of dictionaries with filtering rules
-    """
-    try:
-        rules_df = pd.read_csv(filter_file)
-        required_columns = ['question_id', 'operation', 'value']
-        
-        # Check that required columns exist
-        missing_columns = [col for col in required_columns if col not in rules_df.columns]
-        if missing_columns:
-            print(f"Error: Filter rules CSV is missing required columns: {missing_columns}")
-            return []
-        
-        # Parse the rules
-        rules = []
-        for _, row in rules_df.iterrows():
-            rule = {
-                'question_id': row['question_id'],
-                'operation': row['operation'],
-                'value': row['value'],
-            }
-            
-            # Special handling for "in_list" operation which needs a list value
-            if rule['operation'] == 'in_list' and isinstance(rule['value'], str):
-                try:
-                    # Try to parse as JSON list
-                    import json
-                    rule['value'] = json.loads(rule['value'].replace("'", '"'))
-                except:
-                    # Fallback to simple string splitting
-                    values = rule['value'].strip('[]').split(',')
-                    rule['value'] = [v.strip() for v in values]
-            
-            # Add reason if available
-            if 'reason' in row and not pd.isna(row['reason']):
-                rule['reason'] = row['reason']
-            
-            rules.append(rule)
-        
-        print(f"Loaded {len(rules)} filtering rules from {filter_file}")
-        return rules
-    
-    except Exception as e:
-        print(f"Error loading filter rules: {e}")
-        return []
-
-# Update main function to use the filter file
-def main():
-    args = parse_args()
-    
-    # Create base output directory
-    os.makedirs(args.output, exist_ok=True)
-    
-    # Load filter rules if specified
-    exclusion_rules = []
-    if args.filter:
-        if args.filter_file:
-            exclusion_rules = load_filter_rules(args.filter_file)
-        else:
-            # Default rules if no file specified
-            exclusion_rules = [
-                {
-                    'question_id': 'attention_check',
-                    'operation': 'not_equals',
-                    'value': 4,
-                    'reason': 'Failed attention check'
-                }
-            ]
-            print("Using default filter rules. Specify --filter-file for custom rules.")
-    
-    if args.file:
-        # Process a single file
-        print(f"Analyzing survey data from file: {args.file}")
-        results = analyze_survey(args.file, args.output, args.format, args.dpi)
-        
-        print("\nAnalysis complete!")
-        print(f"Total questions analyzed: {results['total_questions']}")
-        print(f"Multiple choice questions: {results['multiple_choice_questions']}")
-        print(f"Open-ended questions: {results['open_ended_questions']}")
-        print(f"Generated {len(results['figures'])} visualizations")
-        print(f"Report saved to: {results['report_path']}")
-        print(f"All output saved to directory: {args.output}")
-    
-    elif args.dir:
-        # Process all CSV files in the directory as one combined dataset
-        print(f"Analyzing all survey data files in directory: {args.dir} as one combined dataset")
-        combined_results = process_directory(args.dir, args.output, args.format, args.dpi)
-        
-        if combined_results:
-            print("\nCombined analysis complete!")
-            print(f"Processed {combined_results['total_files']} files into one dataset")
-            print(f"Total questions analyzed: {combined_results['total_questions']}")
-            print(f"Multiple choice questions: {combined_results['multiple_choice_questions']}")
-            print(f"Open-ended questions: {combined_results['open_ended_questions']}")
-            print(f"Generated {len(combined_results['figures'])} visualizations")
-            print(f"Report saved to: {combined_results['report_path']}")
-            print(f"All output saved to directory: {args.output}")
-            
-            # Add information about source files to the report
-            with open(combined_results['report_path'], 'a') as f:
-                f.write("\n\nSource Files:\n")
-                f.write("-------------\n")
-                for idx, file_name in enumerate(combined_results['source_files'], 1):
-                    f.write(f"{idx}. {file_name}\n")
-
+#-------------------------------------------------------------------------------
+# Main Script Execution
+#-------------------------------------------------------------------------------
 if __name__ == "__main__":
     main()
