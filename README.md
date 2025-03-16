@@ -123,4 +123,6 @@ If you encounter issues with the script not correctly parsing your survey data:
 
 [MIT License](LICENSE)
 
+## Extra: LLM prompt to consolidate open-ended responses
+
 For the attached csv file, consolidates all similar responses to each question (except for responses that essentially mean "No", "None", or "Not really") and generate a new csv file, where each row has the question, unique (consolidated) response, and the number of instances of that response.
